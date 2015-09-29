@@ -8,9 +8,18 @@ import java.util.*;
 public class SymmetricHashJoin extends Operator {
     private JoinPredicate pred;
     private DbIterator child1, child2;
+    // private DbIterator outerChild = child1, innerChild = child2;
+    private DbIterator outerChild, innerChild;
+    private int outerFieldIndex, innerFieldIndex;
     private TupleDesc comboTD;
+    private boolean currInnerOriginal;
+    private Tuple innerTup = null;
+    private int listIndex = 0;
+    private ArrayList<Tuple> outputBuffer = new ArrayList<Tuple>();
 
+    // inner table
     private HashMap<Object, ArrayList<Tuple>> leftMap = new HashMap<Object, ArrayList<Tuple>>();
+    // outer table
     private HashMap<Object, ArrayList<Tuple>> rightMap = new HashMap<Object, ArrayList<Tuple>>();
 
      /**
@@ -27,7 +36,12 @@ public class SymmetricHashJoin extends Operator {
         this.pred = p;
         this.child1 = child1;
         this.child2 = child2;
+        this.outerChild = child1;
+        this.innerChild = child2;
         comboTD = TupleDesc.merge(child1.getTupleDesc(), child2.getTupleDesc());
+        this.innerFieldIndex = p.getField1();
+        this.outerFieldIndex = p.getField2();
+        currInnerOriginal = true;
     }
 
     public TupleDesc getTupleDesc() {
@@ -39,14 +53,19 @@ public class SymmetricHashJoin extends Operator {
      */
     public void open() throws DbException, NoSuchElementException,
             TransactionAbortedException {
-        // IMPLEMENT ME
+        child1.open();
+        child2.open();
+        super.open();
+
     }
 
     /**
      * Closes the iterator.
      */
     public void close() {
-        // IMPLEMENT ME
+        child1.close();
+        child2.close();
+        super.close();
     }
 
     /**
@@ -57,6 +76,18 @@ public class SymmetricHashJoin extends Operator {
         child2.rewind();
         this.leftMap.clear();
         this.rightMap.clear();
+    }
+
+    private Tuple combineTuples(Tuple t1, Tuple t2) {
+        int td1n = t1.getTupleDesc().numFields();
+        int td2n = t2.getTupleDesc().numFields();
+
+        Tuple t = new Tuple(comboTD);
+        for (int i = 0; i < td1n; i++)
+            t.setField(i, t1.getField(i));
+        for (int i = 0; i < td2n; i++)
+            t.setField(td1n + i, t2.getField(i));
+        return t;
     }
 
     /**
@@ -73,7 +104,49 @@ public class SymmetricHashJoin extends Operator {
      * will return {1,2,3,1,5,6}.
      */
     protected Tuple fetchNext() throws TransactionAbortedException, DbException {
-        // IMPLEMENT ME
+
+        if (!outputBuffer.isEmpty()) {
+            return outputBuffer.remove(0);
+        }
+
+        while (innerChild.hasNext()) {
+            innerTup = innerChild.next();
+            Field innerField = innerTup.getField(innerFieldIndex);
+
+            // stream inner child into inner map
+            if (leftMap.containsKey(innerField)) {
+                leftMap.get(innerField).add(innerTup);
+            } else {
+                ArrayList<Tuple> l = new ArrayList<Tuple>();
+                l.add(innerTup);
+                leftMap.put(innerField, l);
+            }
+
+            // check if there are matches in the outer map
+            if (rightMap.containsKey(innerField)) {
+                ArrayList<Tuple> tupleList = rightMap.get(innerField);
+
+                for (int i = 0; i < tupleList.size(); i++) {
+                    Tuple outerTup = tupleList.get(i);
+                    if (!currInnerOriginal) {
+                        if (pred.filter(innerTup, outerTup)) {
+                            outputBuffer.add(combineTuples(innerTup, outerTup));
+                        }
+                    } else {
+                        if (pred.filter(outerTup, innerTup)) {
+                            outputBuffer.add(combineTuples(outerTup, innerTup));
+                        }
+                    }
+                }
+                return outputBuffer.remove(0);
+            } 
+            switchRelations();
+        }
+
+        if (outerChild.hasNext()) {
+            switchRelations();
+            return fetchNext();
+        }
         return null;
     }
 
@@ -81,7 +154,15 @@ public class SymmetricHashJoin extends Operator {
      * Switches the inner and outer relation.
      */
     private void switchRelations() throws TransactionAbortedException, DbException {
-        // IMPLEMENT ME
+        DbIterator tempChild = outerChild;
+        outerChild = innerChild;
+        innerChild = tempChild;
+
+        HashMap<Object, ArrayList<Tuple>> tempMap = rightMap;
+        rightMap = leftMap;
+        leftMap = tempMap;
+
+        currInnerOriginal = !currInnerOriginal;
     }
 
     @Override
